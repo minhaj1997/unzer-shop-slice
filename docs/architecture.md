@@ -208,7 +208,7 @@ else reserved
     O -> P : initiate(order, method)
     activate P
     P -> U : create payment type (Wero/OB only)
-    P -> U : authorize (card) / charge (Wero, OB)\n(typeId, amount, orderId = our order id, returnUrl)
+    P -> U : authorize (card) / charge (Wero, OB)\n(typeId, amount, currency, returnUrl)
     U --> P : paymentId, txId, redirectUrl?
     note right of P : persist payment + tx = PENDING\ncard captures later, at SHIPPED (§4)
     P --> O : initiation result
@@ -253,7 +253,7 @@ When two buyers try to grab the last unit of stock at the same time, the databas
 
 **Keeping payment state and order state in sync, without extra infrastructure.** Reserving stock and creating the order (§2, §4, steps 1–5) is just two local database transactions, run one after another, in the request itself. If it fails (out of stock), there's nothing to undo, since nothing was ever committed. From `AWAITING_PAYMENT` onward, the other side is Unzer: an external system that is slow and can fail on its own, separately from my database. That's a real boundary, and it needs real care, but the care comes from two properties, not from extra messaging infrastructure between services. Every state change is still a local, all-or-nothing transaction, and `reconcile()` (§4) is idempotent, meaning the webhook, the redirect return, and the reconciliation poller can all call it, in any order, any number of times, and land on the same correct result. A duplicate trigger is either dropped outright (the fingerprint check) or simply does nothing (the state machine ignores a transition it's already made). This is exactly what turns the classic failure case (*the payment succeeded at Unzer, but saving that fact to my database failed*) into something recoverable instead of something that loses data (explained in detail below). When something does go wrong, I undo it with a compensating action instead of a fancy distributed transaction: if payment fails, release the reservation; if an order is cancelled after payment, refund it through Unzer (§4 covers full vs. partial, and how the amount is checked). That kind of infrastructure would only earn its place here the moment payments and orders became genuinely separate deployed services that could no longer call each other directly; §9 covers what that would involve and why it isn't built yet. As long as they're one process, the idempotency and the guard-checked state machine are already doing that job.
 
-**Several layers stop duplicate actions.** (1) `POST /checkout` takes an `Idempotency-Key`, and the database column for that key has a **unique constraint**. If two identical requests arrive at the same time, only one insert succeeds. The other one fails on that constraint and simply returns the same order instead of creating a second one. (2) My own order id is passed to Unzer as their `orderId`, so if a request times out and gets retried, I can check for an existing payment on that order instead of blindly charging the customer again. (3) Webhooks are fingerprinted and checked against `processed_webhook`, so the same webhook is never processed twice. (4) The state machine simply does nothing if asked to repeat a transition it's already made. Put together: no double charge, no double shipment, and no overselling, even under retries.
+**Several layers stop duplicate actions.** (1) `POST /checkout` takes an `Idempotency-Key`, and the database column for that key has a **unique constraint**. If two identical requests arrive at the same time, only one insert succeeds. The other one fails on that constraint and simply returns the same order instead of creating a second one, before the request ever reaches Unzer at all. (2) `payment.order_id` has its own unique constraint, so even if two requests somehow both got past the idempotency check, only one of them could ever insert a payment row for that order. (3) Webhooks are fingerprinted and checked against `processed_webhook`, so the same webhook is never processed twice. (4) The state machine simply does nothing if asked to repeat a transition it's already made. Put together: no double charge, no double shipment, and no overselling, even under retries.
 
 **Concrete failure walkthroughs.**
 
@@ -272,8 +272,8 @@ Representative code: the reservation and the single reconciliation path all trig
 @Transactional
 public boolean reserve(UUID orderId, UUID variantId, int qty, Duration ttl) {
     int updated = jdbc.update("""
-        UPDATE inventory.stock SET reserved = reserved + ?
-        WHERE variant_id = ? AND on_hand - reserved >= ?""", qty, variantId, qty);
+            UPDATE inventory.stock SET reserved = reserved + ?
+            WHERE variant_id = ? AND on_hand - reserved >= ?""", qty, variantId, qty);
     if (updated == 0) return false;                     // lost the race: no oversell
 
     Reservation r = new Reservation();
