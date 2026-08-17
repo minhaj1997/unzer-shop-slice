@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: unzer-shop-slice
+  config:
+    # Loads .env (KEY=VALUE, already valid .properties syntax) as a property source so
+    # UNZER_PRIVATE_KEY etc. are picked up without exporting them into the shell first.
+    # "optional:" means startup doesn't fail if .env is missing (e.g. in CI/tests).
+    import: "optional:file:.env[.properties]"
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/shop}
+    username: ${DB_USER:shop}
+    password: ${DB_PASSWORD:shop}
+    hikari:
+      maximum-pool-size: 10
+
+  jpa:
+    hibernate:
+      ddl-auto: validate   # schema is owned by Flyway migrations, not Hibernate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    schemas: customers,catalog,cart,inventory,orders,payments,shared
+    default-schema: shared
+    create-schemas: true
+
+server:
+  port: ${PORT:8080}
+
+unzer:
+  # Sandbox private key. NEVER commit a real value — see README "Secrets" section.
+  # Provided at runtime via env var; intentionally has no default so the app fails fast if unset.
+  private-key: ${UNZER_PRIVATE_KEY:}
+  # Where Unzer redirects the customer after a Wero/3DS round-trip.
+  return-url: ${UNZER_RETURN_URL:http://localhost:8080/api/orders/return}
+  # Where Unzer sends webhook notifications. Point this at your ngrok/localtunnel URL locally.
+  webhook-url: ${UNZER_WEBHOOK_URL:}
+
+logging:
+  level:
+    root: INFO
+    com.unzer.shop: DEBUG
+  pattern:
+    console: "%d{ISO8601} %-5level [%thread] %logger{36} - %msg%n"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
